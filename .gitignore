@@ -8,6 +8,7 @@
 # Media folders.
 /media
 /media_internal
+/assets
 
 # Packman folders.
 /external/packman/

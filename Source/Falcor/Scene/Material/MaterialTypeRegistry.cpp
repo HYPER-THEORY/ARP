@@ -130,6 +130,7 @@ private:
             {MaterialType::PBRTCoatedConductor, "PBRTCoatedConductor"},
             {MaterialType::PBRTCoatedDiffuse, "PBRTCoatedDiffuse"},
             {MaterialType::RGL, "RGL"},
+            {MaterialType::Bush, "Bush"},
         };
 
         for (const auto& [type, name] : mMaterialType2Name)

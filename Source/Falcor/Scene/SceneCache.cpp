@@ -26,6 +26,8 @@
  # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  **************************************************************************/
 #include "SceneCache.h"
+#include "Core/AssetResolver.h"
+#include "Core/API/RenderContext.h"
 #include "Material/StandardMaterial.h"
 #include "Material/HairMaterial.h"
 #include "Material/ClothMaterial.h"
@@ -43,7 +45,7 @@ namespace Falcor
         /** Specfies the current cache file version.
             This needs to be incremented every time the file format changes!
         */
-        const uint32_t kVersion = 25;
+        const uint32_t kVersion = 27;
 
         /** Scene cache directory (subdirectory in the application data directory).
         */
@@ -906,19 +908,100 @@ namespace Falcor
 
     void SceneCache::writeEnvMap(OutputStream& stream, const ref<EnvMap>& pEnvMap)
     {
-        auto path = pEnvMap->getEnvMap()->getSourcePath();
-        stream.write(path);
+        auto pTexture = pEnvMap->getEnvMap();
+        const auto& sourcePath = pTexture->getSourcePath();
+
+        bool hasSourcePath = !sourcePath.empty();
+        stream.write(hasSourcePath);
+
+        if (hasSourcePath)
+        {
+            stream.write(sourcePath);
+        }
+        else
+        {
+            FALCOR_ASSERT(pTexture->getType() == Resource::Type::Texture2D);
+            stream.write(static_cast<uint32_t>(pTexture->getType()));
+            stream.write(static_cast<uint32_t>(pTexture->getFormat()));
+            stream.write(pTexture->getWidth());
+            stream.write(pTexture->getHeight());
+            stream.write(pTexture->getMipCount());
+            stream.write(pTexture->getArraySize());
+
+            auto pRenderContext = pTexture->getDevice()->getRenderContext();
+            uint32_t subresourceCount = pTexture->getSubresourceCount();
+            for (uint32_t s = 0; s < subresourceCount; ++s)
+            {
+                auto layout = pTexture->getSubresourceLayout(s);
+                auto data = pRenderContext->readTextureSubresource(pTexture.get(), s);
+                uint64_t byteSize = layout.getTotalByteSize();
+                stream.write(byteSize);
+                FALCOR_ASSERT(data.size() == byteSize);
+                stream.write(data.data(), byteSize);
+            }
+        }
+
         stream.write(pEnvMap->mData);
         stream.write(pEnvMap->mRotation);
     }
 
     ref<EnvMap> SceneCache::readEnvMap(InputStream& stream, ref<Device> pDevice)
     {
-        auto path = stream.read<std::filesystem::path>();
-        auto pEnvMap = EnvMap::createFromFile(pDevice, path);
-        if (!pEnvMap) FALCOR_THROW("Failed to load environment map");
-        stream.read(pEnvMap->mData);
-        stream.read(pEnvMap->mRotation);
+        bool hasSourcePath = stream.read<bool>();
+
+        ref<Texture> pTexture;
+        if (hasSourcePath)
+        {
+            auto path = stream.read<std::filesystem::path>();
+            auto resolved = AssetResolver::getDefaultResolver().resolvePath(path, AssetCategory::Texture);
+            if (resolved.empty()) resolved = path;
+            pTexture = Texture::createFromFile(pDevice, resolved, true, false);
+        }
+        else
+        {
+            auto type = static_cast<Resource::Type>(stream.read<uint32_t>());
+            auto format = static_cast<ResourceFormat>(stream.read<uint32_t>());
+            uint32_t width = stream.read<uint32_t>();
+            uint32_t height = stream.read<uint32_t>();
+            uint32_t mipCount = stream.read<uint32_t>();
+            uint32_t arraySize = stream.read<uint32_t>();
+
+            FALCOR_CHECK(type == Resource::Type::Texture2D, "Unsupported env map texture type {}.", static_cast<uint32_t>(type));
+
+            struct SubresourceData
+            {
+                std::vector<uint8_t> bytes;
+            };
+            uint32_t subresourceCount = mipCount * arraySize;
+            std::vector<SubresourceData> subresources(subresourceCount);
+            for (uint32_t s = 0; s < subresourceCount; ++s)
+            {
+                uint64_t byteSize = stream.read<uint64_t>();
+                subresources[s].bytes.resize(byteSize);
+                stream.read(subresources[s].bytes.data(), byteSize);
+            }
+
+            ResourceBindFlags bindFlags = ResourceBindFlags::ShaderResource;
+            pTexture = pDevice->createTexture2D(width, height, format, arraySize, mipCount, nullptr, bindFlags);
+            if (pTexture)
+            {
+                for (uint32_t s = 0; s < subresourceCount; ++s)
+                {
+                    pTexture->setSubresourceBlob(s, subresources[s].bytes.data(), subresources[s].bytes.size());
+                }
+            }
+        }
+
+        EnvMapData data;
+        float3 rotation;
+        stream.read(data);
+        stream.read(rotation);
+
+        if (!pTexture) return ref<EnvMap>();
+
+        auto pEnvMap = EnvMap::create(pDevice, pTexture);
+        pEnvMap->mData = data;
+        pEnvMap->mRotation = rotation;
         return pEnvMap;
     }
 

@@ -126,6 +126,8 @@ namespace Falcor
         static constexpr uint32_t kMaxBonesPerVertex = 4;
         static constexpr uint32_t kInvalidAttributeIndex = -1;
 
+        static constexpr RasterizerState::CullMode kDefaultCullMode = RasterizerState::CullMode(-1);
+
         /** Settings for how the scene ray tracing acceleration structures are updated.
         */
         enum class UpdateMode
@@ -921,19 +923,9 @@ namespace Falcor
             \param[in] pRenderContext Render context.
             \param[in] pState Graphics state.
             \param[in] pVars Graphics vars.
-            \param[in] cullMode Optional rasterizer cull mode. The default is to cull back-facing primitives.
+            \param[in] cullMode Optional rasterizer cull mode.
         */
-        void rasterize(RenderContext* pRenderContext, GraphicsState* pState, ProgramVars* pVars, RasterizerState::CullMode cullMode = RasterizerState::CullMode::Back);
-
-        /** Render the scene using the rasterizer.
-            This overload uses the supplied rasterizer states.
-            \param[in] pRenderContext Render context.
-            \param[in] pState Graphics state.
-            \param[in] pVars Graphics vars.
-            \param[in] pRasterizerStateCW Rasterizer state for meshes with clockwise triangle winding.
-            \param[in] pRasterizerStateCCW Rasterizer state for meshes with counter-clockwise triangle winding. Can be the same as for clockwise.
-        */
-        void rasterize(RenderContext* pRenderContext, GraphicsState* pState, ProgramVars* pVars, const ref<RasterizerState>& pRasterizerStateCW, const ref<RasterizerState>& pRasterizerStateCCW);
+        void rasterize(RenderContext* pRenderContext, GraphicsState* pState, ProgramVars* pVars, RasterizerState::CullMode cullMode = kDefaultCullMode);
 
         /** Get the required raytracing maximum attribute size for this scene.
             Note: This depends on what types of geometry are used in the scene.
@@ -1237,6 +1229,7 @@ namespace Falcor
             uint32_t count = 0;             ///< Number of draws.
             bool ccw = true;                ///< True if counterclockwise triangle winding.
             ResourceFormat ibFormat = ResourceFormat::Unknown;  ///< Index buffer format.
+            RasterizerState::CullMode cullMode = RasterizerState::CullMode::Back;
         };
 
         GeometryTypeFlags mGeometryTypes;                           ///< Set of geometry types that exist in the scene.
