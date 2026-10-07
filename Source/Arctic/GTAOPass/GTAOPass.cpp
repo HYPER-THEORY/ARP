@@ -176,7 +176,7 @@ void GTAOPass::allocateResources(uint32_t fullW, uint32_t fullH)
 
 void GTAOPass::renderUI(Gui::Widgets& widget)
 {
-    widget.var("Effect Radius (world)", mEffectRadius, 0.05f, 10.f, 0.01f);
+    widget.var("Effect Radius (world)", mEffectRadius, 0.05f, 100.f, 0.01f);
     widget.tooltip("World-space AO radius (UE GTAOParams[3].y / AmbientOcclusionRadius).");
     widget.var("Thickness", mThickness, 0.f, 1.f, 0.01f);
     widget.tooltip("UE r.GTAO.ThicknessBlend. Uploaded as clamp(1 - t*t, 0, 0.99). Higher = more occlusion retained "

@@ -46,7 +46,7 @@ const ChannelList kOutputs = {
 
 const char kConstantDepthBias[] = "constantDepthBias";
 const char kReceiverBias[] = "receiverBias";
-const char kSoftTransitionScale[] = "softTransitionScale";
+const char kSoftTransitionTexels[] = "softTransitionTexels";
 const char kShadowSharpen[] = "shadowSharpen";
 const char kFilterMode[] = "filterMode";
 const char kPCFKernelSize[] = "pcfKernelSize";
@@ -82,7 +82,7 @@ void ShadowProjectionPass::parseProperties(const Properties& props)
     {
         if (key == kConstantDepthBias) mConstantDepthBias = value;
         else if (key == kReceiverBias) mReceiverBias = value;
-        else if (key == kSoftTransitionScale) mSoftTransitionScale = value;
+        else if (key == kSoftTransitionTexels) mSoftTransitionTexels = value;
         else if (key == kShadowSharpen) mShadowSharpen = value;
         else if (key == kFilterMode) mFilterMode = FilterMode(uint32_t(value));
         else if (key == kPCFKernelSize) mPCFKernelSize = value;
@@ -97,7 +97,7 @@ Properties ShadowProjectionPass::getProperties() const
     Properties props;
     props[kConstantDepthBias] = mConstantDepthBias;
     props[kReceiverBias] = mReceiverBias;
-    props[kSoftTransitionScale] = mSoftTransitionScale;
+    props[kSoftTransitionTexels] = mSoftTransitionTexels;
     props[kShadowSharpen] = mShadowSharpen;
     props[kFilterMode] = uint32_t(mFilterMode);
     props[kPCFKernelSize] = mPCFKernelSize;
@@ -195,7 +195,12 @@ void ShadowProjectionPass::renderUI(Gui::Widgets& widget)
     mOptionsChanged |= widget.var("Constant bias (m)", mConstantDepthBias, 0.f, 1.f, 0.001f);
     widget.tooltip("Should match ShadowPass's constant bias. Only used to nudge the receiver on the foliage transmission path.");
     mOptionsChanged |= widget.var("Receiver bias (m)", mReceiverBias, 0.f, 5.f, 0.01f);
-    mOptionsChanged |= widget.var("Soft transition scale (1/m)", mSoftTransitionScale, 0.1f, 200.f, 0.1f);
+    widget.tooltip("Lower end of lerp(receiverBias, 1, NoL). UE's CSM value is 0.1.");
+    mOptionsChanged |= widget.var("Soft transition (texels)", mSoftTransitionTexels, 0.5f, 64.f, 0.5f);
+    widget.tooltip(
+        "Width of the depth comparison band, in shadowmap texels. UE computes 10 texels\n"
+        "(r.Shadow.CSMDepthBias / depth range scaled by the world texel size), and that\n"
+        "wide band is what absorbs sub-texel depth error instead of a large depth bias.");
     mOptionsChanged |= widget.var("Shadow sharpen", mShadowSharpen, 0.f, 8.f, 0.05f);
     widget.tooltip("UE ShadowSharpen: expands contrast about 0.5 after filtering. 1 = off.");
     // Scales subsurfaceDensityFromOpacity output into DensityMulConstant
@@ -254,6 +259,20 @@ void ShadowProjectionPass::execute(RenderContext* pRenderContext, const RenderDa
     var["PerFrameCB"]["gMaxSubjectDepth"] = mShadowView.maxSubjectDepth;
     var["PerFrameCB"]["gConstantDepthBias"] = mConstantDepthBias;
     var["PerFrameCB"]["gReceiverBias"] = mReceiverBias;
+
+    // UE sizes the soft transition as a fixed number of shadowmap texels
+    // (ComputeTransitionSize in ShadowRendering.cpp): the band is
+    // CVarCSMShadowDepthBias worth of world texels, 10 by default. Recompute the
+    // world size of one texel from the frustum ShadowPass actually fitted rather
+    // than from a scene-radius estimate, so the band tracks the real texel grid.
+    // The larger of the two axes is used: the band has to cover the depth error of
+    // whichever axis is coarser.
+    {
+        const float texelWorldX = 2.f * mShadowView.orthoHalfExtent.x / float(std::max(shadowDim.x, 1u));
+        const float texelWorldY = 2.f * mShadowView.orthoHalfExtent.y / float(std::max(shadowDim.y, 1u));
+        const float texelWorld = std::max(texelWorldX, texelWorldY);
+        mSoftTransitionScale = 1.f / std::max(mSoftTransitionTexels * texelWorld, 1e-6f);
+    }
     var["PerFrameCB"]["gSoftTransitionScale"] = mSoftTransitionScale;
     var["PerFrameCB"]["gDensityDepthScale"] = mDensityDepthScale;
     var["PerFrameCB"]["gShadowSharpen"] = mShadowSharpen;

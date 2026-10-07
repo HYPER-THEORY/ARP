@@ -108,27 +108,20 @@ RenderPassReflection CompositePass::reflect(const CompileData& compileData)
 
 void CompositePass::renderUI(Gui::Widgets& widget)
 {
-    widget.checkbox("Direct (DIPass)", mEnableDirect);
+    widget.checkbox("Direct", mEnableDirect);
     if (mEnableDirect) widget.var("Direct Intensity", mDirectIntensity, 0.f, 8.f, 0.01f);
 
-    widget.checkbox("Ambient (AmbientPass)", mEnableAmbient);
-    widget.tooltip("Sky direct lighting: the single-bounce ambient IBL term.");
+    widget.checkbox("Ambient", mEnableAmbient);
     if (mEnableAmbient) widget.var("Ambient Intensity", mAmbientIntensity, 0.f, 8.f, 0.01f);
 
-    widget.checkbox("Indirect (canopy multi-scatter)", mEnableIndirect);
-    widget.tooltip("The indirect pass' >= 2-bounce canopy radiance. It is intentionally "
-                   "not multiplied by AO: AO models occlusion of the uncollided sky, so applying "
-                   "it would darken the very term meant to lift the shadow side.");
+    widget.checkbox("Indirect", mEnableIndirect);
     if (mEnableIndirect) widget.var("Indirect Intensity", mIndirectIntensity, 0.f, 8.f, 0.01f);
 
-    widget.checkbox("Emissive (GBufferPass)", mEnableEmissive);
-    widget.tooltip("Self-illumination. UE's base pass writes this straight into SceneColor, so it "
-                   "bypasses shadowing and AO entirely. It is also the only radiance an Unlit "
-                   "pixel has -- DIPass outputs 0 for those.");
+    widget.checkbox("Emissive", mEnableEmissive);
     if (mEnableEmissive) widget.var("Emissive Intensity", mEmissiveIntensity, 0.f, 8.f, 0.01f);
 
     widget.separator();
-    widget.checkbox("Skybox (background)", mEnableSkybox);
+    widget.checkbox("Skybox", mEnableSkybox);
     if (mEnableSkybox) widget.var("Skybox Intensity", mSkyboxIntensity, 0.f, 8.f, 0.01f);
 }
 

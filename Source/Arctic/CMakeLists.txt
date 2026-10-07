@@ -48,6 +48,8 @@ target_sources(Arctic PRIVATE
     AmbientPass/AmbientPass.cpp
     AmbientPass/AmbientPass.h
     AmbientPass/AmbientPass.3d.slang
+    AmbientPass/IrradianceConvolve.cs.slang
+    AmbientPass/PreIntegratedGF.cs.slang
     CompositePass/CompositePass.cpp
     CompositePass/CompositePass.h
     CompositePass/CompositePass.cs.slang

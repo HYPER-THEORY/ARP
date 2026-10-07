@@ -4,14 +4,14 @@
  # Redistribution and use in source and binary forms, with or without
  # modification, are permitted provided that the following conditions
  # are met:
- #  * Redistributions of source code must retain the copyright
+ #  * Redistributions of source code must retain the above copyright
  #    notice, this list of conditions and the following disclaimer.
  #  * Redistributions in binary form must reproduce the above copyright
  #    notice, this list of conditions and the following disclaimer in the
  #    documentation and/or other materials provided with the distribution.
  #  * Neither the name of NVIDIA CORPORATION nor the names of its
  #    contributors may be used to endorse or promote products derived
- #    from this software without specific written permission.
+ #    from this software without specific prior written permission.
  #
  # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS "AS IS" AND ANY
  # EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -34,14 +34,30 @@
     Two modes:
       - Fixed color: a uniform gAmbientColor stands in
         for the envmap lookup in diffuse/specular/foliage subsurface.
-      - EnvMap: ports UnrealEngine's AmbientCubemapComposite.usf:MainPS to Slang,
-        sampling Falcor's EnvMap (lat-long) for IBL.
+      - EnvMap: ports UnrealEngine's AmbientCubemapComposite.usf:MainPS to Slang.
+
+    IBL sources, each matching UE's, differ per lobe:
+
+      - Diffuse reads the cosine-convolved irradiance map built by
+        IrradianceConvolve.cs.slang. UE does the same convolution offline at
+        texture build time, into the mips at and below GDiffuseConvolveMipLevel
+        (TextureCompressorModule.cpp:GenerateAngularFilteredMips, cone angle
+        clamped to PI/2). The lookup is *independent of roughness*; it is
+        AmbientCubemapMipAdjust.z, a single absolute mip for every pixel. Falcor's
+        box-filtered lat-long mips cannot stand in for it, hence the dedicated map.
+
+      - Specular reads the env map's roughness-derived mip, matching
+        ComputeCubemapMipFromRoughness (CubemapCommon.ush).
+
+      - The F*G term comes from a PreintegratedGF table built once by
+        PreIntegratedGF.cs.slang, matching UE's EnvBRDF (BRDF.ush) rather than the
+        Lazarov analytic fit -- the fit is a different curve, not merely a cheaper
+        way to evaluate the same one.
 
     In both modes we read the AO pass's aoMap, combine it with the material AO in
-    GBufferC.a the way UE does, and apply UE's EnvBRDFApprox for specular scaling.
-    The diffuse lookup uses the *surface* normal, matching
-    AmbientCubemapComposite.usf — UE's GTAO produces no bent normal and
-    this composite applies AO purely multiplicatively.
+    GBufferC.a the way UE does, and apply specular occlusion via
+    GetSpecularOcclusion (ReflectionEnvironmentShared.ush) as UE's reflection
+    path does.
 */
 
 import Scene.Scene;
@@ -52,15 +68,11 @@ import Arctic.GBufferPass.GBufferHelpers;
 cbuffer PerFrameCB
 {
     uint2  gFrameDim;
-    float3 gTint;             // AmbientCubemapColor.rgb (tint * intensity premultiplied in C++)
+    float3 gTint;             // AmbientCubemapColor.rgb
     float  gIntensity;        // additional user multiplier
     float3 gAmbientColor;     // fixed ambient IBL color (used when gUseFixedColor != 0)
     uint   gUseFixedColor;    // 1 = use gAmbientColor, 0 = sample envMap
-    float  gDiffuseMip;       // AmbientCubemapMipAdjust.z (envMap mode only)
-    float  gSpecularMipBoost; // subtracted from roughness-derived specular mip (envMap mode only)
     float  gMipCount;         // AmbientCubemapMipAdjust.w (envMap mode only)
-    uint   gApplyAOToDiffuse;
-    uint   gApplyAOToSpecular;
 };
 
 Texture2D<float4> gGBufferA;
@@ -68,7 +80,15 @@ Texture2D<float4> gGBufferB;
 Texture2D<float4> gGBufferC;
 Texture2D<float4> gGBufferD;
 Texture2D<float>  gSceneDepth;
-Texture2D<float4> gAOMap;       // AO in .r
+Texture2D<float4> gAOMap;        // AO in .r
+
+// Cosine-convolved irradiance (lat-long), built by IrradianceConvolve.cs.slang.
+Texture2D<float4> gIrradiance;
+SamplerState      gIrradianceSampler;
+
+// UE's PreintegratedGF split-sum table: x = NoV, y = roughness, .r = A, .g = B.
+Texture2D<float2> gPreIntegratedGF;
+SamplerState      gPreIntegratedGFSampler;
 
 RWTexture2D<float4> gAmbient;
 
@@ -78,30 +98,51 @@ static const float PI = 3.14159265358979f;
 
 float pow5(float x) { float x2 = x * x; return x2 * x2 * x; }
 
-// UE BRDF.ush — Lazarov's EnvBRDF approximation (no LUT needed).
-float2 EnvBRDFApproxLazarov(float Roughness, float NoV)
-{
-    const float4 c0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
-    const float4 c1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
-    float4 r = Roughness * c0 + c1;
-    float a004 = min(r.x * r.x, exp2(-9.28f * NoV)) * r.x + r.y;
-    float2 AB = float2(-1.04f, 1.04f) * a004 + r.zw;
-    return AB;
-}
-
-// UE BRDF.ush — Specular IBL scaling.
-float3 EnvBRDFApprox(float3 SpecularColor, float Roughness, float NoV)
-{
-    float2 AB = EnvBRDFApproxLazarov(Roughness, NoV);
-    float F90 = saturate(50.0f * SpecularColor.g);
-    return SpecularColor * AB.x + F90 * AB.y;
-}
-
-// UE CubemapCommon.ush — mip from roughness.
+/** UE CubemapCommon.ush -- mip from roughness. Only the *specular* lookup uses
+    this; the diffuse lookup is a fixed mip (see csMain).
+*/
 float ComputeCubemapMipFromRoughness(float Roughness, float MipCount)
 {
     float Level = 3.0f - 1.15f * log2(max(Roughness, 1e-4f));
     return MipCount - 1.0f - Level;
+}
+
+/** UE AmbientCubemapMipAdjust.z == MipCount - GDiffuseConvolveMipLevel.
+
+    Computed here rather than uploaded: both terms are already available
+    (gMipCount) and GDiffuseConvolveMipLevel is a fixed engine constant
+    (GlobalRenderResources.cpp: `const uint32 GDiffuseConvolveMipLevel = 4`), so
+    uploading the result separately would just be a second source of truth.
+
+    Note the constant is a *count back from the coarsest mip*, not a mip index:
+    AbsoluteDiffuseMip = MipCount - 4 means mip 6 for a 512-wide cube (MipCount
+    10) and mip 4 for 128 (MipCount 8).
+*/
+float GetAbsoluteDiffuseMip()
+{
+    const float kGDiffuseConvolveMipLevel = 4.0f;
+    return max(gMipCount - kGDiffuseConvolveMipLevel, 0.0f);
+}
+
+/** UE BRDF.ush -- preintegrated G*F from the split-sum table.
+
+    Anything less than 2% is physically impossible and is instead considered to
+    be shadowing, hence the F90 clamp.
+*/
+float3 EnvBRDF(float3 SpecularColor, float Roughness, float NoV)
+{
+    float2 AB = gPreIntegratedGF.SampleLevel(gPreIntegratedGFSampler, float2(NoV, Roughness), 0).rg;
+    return SpecularColor * AB.x + saturate(50.0f * SpecularColor.g) * AB.y;
+}
+
+/** UE ReflectionEnvironmentShared.ush -- AO applied to the specular lobe.
+
+    Not a plain multiplication: a rough surface occluded from the side is barely
+    darker, because the lobe still sees plenty of unoccluded directions.
+*/
+float GetSpecularOcclusion(float NoV, float RoughnessSq, float AO)
+{
+    return saturate(pow(NoV + AO, RoughnessSq) - 1.0f + AO);
 }
 
 // ---- GBuffer decode ----
@@ -172,7 +213,7 @@ void csMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 V = normalize(gScene.camera.getPosition() - worldPos);
 
     // UE combines the screen-space AO with the material AO baked into GBufferC.a
-    // (AmbientCubemapComposite.usf — GBuffer.GBufferAO * AmbientOcclusionTexture).
+    // (AmbientCubemapComposite.usf -- GBuffer.GBufferAO * AmbientOcclusionTexture).
     float ao = g.gbufferAO * gAOMap.Load(int3(pixel, 0)).r;
 
     // Derived colors (UE SetGBufferForShading convention).
@@ -199,18 +240,26 @@ void csMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     }
     else
     {
-        // Surface normal, as in AmbientCubemapComposite.usf (N = GBuffer.WorldNormal).
-        diffuseLookup = gScene.envMap.eval(N, gDiffuseMip);
-        float specMip = ComputeCubemapMipFromRoughness(g.roughness, gMipCount) - gSpecularMipBoost;
+        // ---- Diffuse: cosine-convolved irradiance, roughness-independent ----
+        // envMap.eval() bundles intensity+tint into its result, so the
+        // irradiance equivalent must too -- otherwise diffuse and specular would
+        // disagree about the environment's brightness.
+        float3 envIntensity = gScene.envMap.getIntensity();
+        float2 diffuseUV = gScene.envMap.worldToUv(N);
+        diffuseLookup = gIrradiance.SampleLevel(gIrradianceSampler, diffuseUV, 0).rgb * envIntensity;
+
+        // ---- Specular: roughness-derived mip ----
+        float specMip = ComputeCubemapMipFromRoughness(g.roughness, gMipCount);
         specMip = clamp(specMip, 0.f, max(gMipCount - 1.f, 0.f));
         specularLookup = gScene.envMap.eval(R, specMip);
-        // UE samples this along ScreenVector (AmbientCubemapComposite.usf) —
+
+        // UE samples this along ScreenVector (AmbientCubemapComposite.usf) --
         // the camera->pixel direction, i.e. the sky *behind* the surface, which is
         // where light transmitted toward the viewer comes from. Not V.
         float3 screenVector = normalize(worldPos - gScene.camera.getPosition());
         // And UE *subtracts* 2.5 mips: transmission is more directional than
         // diffuse, so this lookup is sharper than the diffuse one, not blurrier.
-        float subsurfMip = clamp(gDiffuseMip - 2.5f, 0.f, max(gMipCount - 1.f, 0.f));
+        float subsurfMip = clamp(GetAbsoluteDiffuseMip() - 2.5f, 0.f, max(gMipCount - 1.f, 0.f));
         subsurfLookup = gScene.envMap.eval(screenVector, subsurfMip);
     }
 
@@ -218,7 +267,7 @@ void csMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 nonSpecular = diffuseColor * diffuseLookup;
 
     // ---- Specular IBL ----
-    float3 specular = specularLookup * EnvBRDFApprox(specularColor, g.roughness, NoV);
+    float3 specular = specularLookup * EnvBRDF(specularColor, g.roughness, NoV);
 
     // ---- Subsurface tint ----
     // UE AmbientCubemapComposite.usf. UE gates this on
@@ -235,12 +284,16 @@ void csMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // AO is applied here, *after* the subsurface terms are folded in, because
     // that is where UE applies it: a single `OutColor *= AmbientOcclusion` at
-    // AmbientCubemapComposite.usf. The ordering is load-bearing — it gives
+    // AmbientCubemapComposite.usf. The ordering is load-bearing -- it gives
     // the view-independent subsurface term one factor of AO and the
     // view-dependent term two (it already carries the inline `ao` above).
-    // Multiplying before the branch would drop one factor from each.
-    if (gApplyAOToDiffuse != 0u) nonSpecular *= ao;
-    if (gApplyAOToSpecular != 0u) specular *= ao;
+    //
+    // The specular term is the exception: UE's reflection path scales it by
+    // specular occlusion instead (ReflectionEnvironmentPixelShader.usf:209-212),
+    // which folds AO and the view/roughness dependence into one factor. A plain
+    // `ao` multiply would over-darken rough surfaces at grazing angles.
+    nonSpecular *= ao;
+    specular *= GetSpecularOcclusion(NoV, g.roughness * g.roughness, ao);
 
     // Final ambient = tint * intensity * (diffuse + specular).
     float3 ambient = gTint * gIntensity * (nonSpecular + specular);

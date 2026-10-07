@@ -4,14 +4,14 @@
  # Redistribution and use in source and binary forms, with or without
  # modification, are permitted provided that the following conditions
  # are met:
- #  * Redistributions of source code must retain the copyright
+ #  * Redistributions of source code must retain the above copyright
  #    notice, this list of conditions and the following disclaimer.
  #  * Redistributions in binary form must reproduce the above copyright
  #    notice, this list of conditions and the following disclaimer in the
  #    documentation and/or other materials provided with the distribution.
  #  * Neither the name of NVIDIA CORPORATION nor the names of its
  #    contributors may be used to endorse or promote products derived
- #    from this software without specific written permission.
+ #    from this software without specific prior written permission.
  #
  # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS "AS IS" AND ANY
  # EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -31,6 +31,8 @@
 namespace
 {
 const std::string kProgramFile = "Arctic/AmbientPass/AmbientPass.3d.slang";
+const std::string kIrradianceProgramFile = "Arctic/AmbientPass/IrradianceConvolve.cs.slang";
+const std::string kPreIntegratedGFProgramFile = "Arctic/AmbientPass/PreIntegratedGF.cs.slang";
 
 const ChannelList kInputs = {
     { "gBufferA", "gGBufferA", "World normal + per-object", true, ResourceFormat::Unknown },
@@ -44,14 +46,28 @@ const ChannelList kOutputs = {
     { "ambient", "gAmbient", "Sky direct (single-bounce ambient IBL, RGBA32Float HDR)", false, ResourceFormat::RGBA32Float },
 };
 
+// Irradiance map resolution. A 64x32 lat-long is 5.6 degrees per texel, finer than
+// the 8x8 cube face UE's diffuse mip resolves to (11.25 degrees), and true irradiance
+// has no angular detail beyond the first few spherical-harmonic bands anyway. Finer
+// than that would only cost build time.
+constexpr uint32_t kIrradianceWidth = 64;
+constexpr uint32_t kIrradianceHeight = 32;
+
+// Cosine-weighted samples per irradiance texel. The env map already has mips, so the
+// source LOD does most of the variance reduction; this only has to resolve the
+// hemisphere-integral shape.
+constexpr uint32_t kIrradianceSamples = 512;
+
+// UE SystemTextures.cpp: the PreintegratedGF table is 128x32 (the 128x128 variant is
+// behind `bReference`, off by default) filled with 128 samples per texel.
+constexpr uint32_t kPreIntegratedGFWidth = 128;
+constexpr uint32_t kPreIntegratedGFHeight = 32;
+constexpr uint32_t kPreIntegratedGFSamples = 128;
+
 const char kTint[] = "tint";
 const char kIntensity[] = "intensity";
 const char kUseFixedColor[] = "useFixedColor";
 const char kAmbientColor[] = "ambientColor";
-const char kDiffuseMip[] = "diffuseMip";
-const char kSpecularMipBoost[] = "specularMipBoost";
-const char kApplyAOToSpecular[] = "applyAOToSpecular";
-const char kApplyAOToDiffuse[] = "applyAOToDiffuse";
 } // namespace
 
 AmbientPass::AmbientPass(ref<Device> pDevice, const Properties& props) : RenderPass(pDevice)
@@ -62,11 +78,25 @@ AmbientPass::AmbientPass(ref<Device> pDevice, const Properties& props) : RenderP
         else if (key == kIntensity) mIntensity = value;
         else if (key == kUseFixedColor) mUseFixedColor = value;
         else if (key == kAmbientColor) mAmbientColor = value;
-        else if (key == kDiffuseMip) mDiffuseMip = value;
-        else if (key == kSpecularMipBoost) mSpecularMipBoost = value;
-        else if (key == kApplyAOToSpecular) mApplyAOToSpecular = value;
-        else if (key == kApplyAOToDiffuse) mApplyAOToDiffuse = value;
     }
+
+    // Ambient IBL binds both environment-derived resources unconditionally, so both
+    // need a valid placeholder before the first update. A 1x1 black irradiance keeps
+    // the descriptor valid when the scene has no environment map (or in fixed-color
+    // mode), where the shader would otherwise sample an unbound resource.
+    mpIrradiance = mpDevice->createTexture2D(1, 1, ResourceFormat::RGBA32Float, 1, 1, nullptr, ResourceBindFlags::ShaderResource);
+    mpIrradiance->setName("AmbientPass.irradiancePlaceholder");
+
+    Sampler::Desc irradianceSamplerDesc;
+    irradianceSamplerDesc.setFilterMode(TextureFilteringMode::Linear, TextureFilteringMode::Linear, TextureFilteringMode::Linear);
+    // The lat-long map wraps horizontally but not vertically.
+    irradianceSamplerDesc.setAddressingMode(TextureAddressingMode::Wrap, TextureAddressingMode::Clamp, TextureAddressingMode::Clamp);
+    mpIrradianceSampler = mpDevice->createSampler(irradianceSamplerDesc);
+
+    Sampler::Desc gfSamplerDesc;
+    gfSamplerDesc.setFilterMode(TextureFilteringMode::Linear, TextureFilteringMode::Linear, TextureFilteringMode::Linear);
+    gfSamplerDesc.setAddressingMode(TextureAddressingMode::Clamp, TextureAddressingMode::Clamp, TextureAddressingMode::Clamp);
+    mpPreIntegratedGFSampler = mpDevice->createSampler(gfSamplerDesc);
 }
 
 Properties AmbientPass::getProperties() const
@@ -76,10 +106,6 @@ Properties AmbientPass::getProperties() const
     props[kIntensity] = mIntensity;
     props[kUseFixedColor] = mUseFixedColor;
     props[kAmbientColor] = mAmbientColor;
-    props[kDiffuseMip] = mDiffuseMip;
-    props[kSpecularMipBoost] = mSpecularMipBoost;
-    props[kApplyAOToSpecular] = mApplyAOToSpecular;
-    props[kApplyAOToDiffuse] = mApplyAOToDiffuse;
     return props;
 }
 
@@ -96,6 +122,9 @@ void AmbientPass::setScene(RenderContext* pRenderContext, const ref<Scene>& pSce
 {
     mpScene = pScene;
     mpPass.reset();
+    // The irradiance map was convolved from the previous scene's env map.
+    mpIrradianceSrc = nullptr;
+    mIrradianceSrcDim = uint2(0);
     mDirty = true;
 }
 
@@ -113,6 +142,96 @@ void AmbientPass::rebuildPass()
     mDirty = false;
 }
 
+void AmbientPass::updatePreIntegratedGF(RenderContext* pRenderContext)
+{
+    if (mpPreIntegratedGF) return;
+
+    // RG16Unorm matches UE's PF_G16R16, including its [0,1] clamp on both channels.
+    mpPreIntegratedGF = mpDevice->createTexture2D(
+        kPreIntegratedGFWidth,
+        kPreIntegratedGFHeight,
+        ResourceFormat::RG16Unorm,
+        1,
+        1,
+        nullptr,
+        ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+    );
+    mpPreIntegratedGF->setName("AmbientPass.preIntegratedGF");
+
+    if (!mpPreIntegratedGFPass)
+    {
+        mpPreIntegratedGFPass = ComputePass::create(mpDevice, kPreIntegratedGFProgramFile, "csMain");
+    }
+
+    auto var = mpPreIntegratedGFPass->getVars()->getRootVar();
+    var["gTable"] = mpPreIntegratedGF;
+    var["PerFrameCB"]["gTableDim"] = uint2(kPreIntegratedGFWidth, kPreIntegratedGFHeight);
+    var["PerFrameCB"]["gNumSamples"] = kPreIntegratedGFSamples;
+
+    mpPreIntegratedGFPass->execute(pRenderContext, uint3(kPreIntegratedGFWidth, kPreIntegratedGFHeight, 1));
+    pRenderContext->uavBarrier(mpPreIntegratedGF.get());
+}
+
+void AmbientPass::updateIrradiance(RenderContext* pRenderContext)
+{
+    if (!mpScene) return;
+
+    auto pEnvMap = mpScene->getEnvMap();
+    auto pEnvTexture = pEnvMap ? pEnvMap->getEnvMap() : nullptr;
+    if (!pEnvTexture) return;
+
+    const uint2 srcDim = uint2(pEnvTexture->getWidth(), pEnvTexture->getHeight());
+
+    // Rebuild only when the source texture or its resolution changed. Rotation and
+    // intensity/tint are applied at lookup time (EnvMap::toLocal / getIntensity), so
+    // they must not invalidate the convolution.
+    if (mpIrradiance && mpIrradianceSrc == pEnvTexture && all(mIrradianceSrcDim == srcDim)) return;
+
+    if (!mpIrradiancePass)
+    {
+        // No scene dependency: the convolution only reads the env map and MathHelpers.
+        mpIrradiancePass = ComputePass::create(mpDevice, kIrradianceProgramFile, "csMain");
+    }
+
+    if (!mpIrradiance || mpIrradiance->getWidth() != kIrradianceWidth || mpIrradiance->getHeight() != kIrradianceHeight)
+    {
+        mpIrradiance = mpDevice->createTexture2D(
+            kIrradianceWidth,
+            kIrradianceHeight,
+            ResourceFormat::RGBA32Float,
+            1,
+            1,
+            nullptr,
+            ResourceBindFlags::ShaderResource | ResourceBindFlags::UnorderedAccess
+        );
+        mpIrradiance->setName("AmbientPass.irradiance");
+    }
+
+    // Match one sample's footprint to a source texel so a small bright sun cannot
+    // land as single-texel spikes in the mean. A cosine sample covers 2*PI/N
+    // steradians; a source texel at the equator covers (2*PI/W)*(PI/(W/2)) =
+    // 4*PI^2/W^2. Equating the two gives W_m = sqrt(2*PI*N), i.e.
+    // lod = log2(W / sqrt(2*PI*N)).
+    const float samples = float(kIrradianceSamples);
+    const float matchedWidth = std::sqrt(2.f * float(M_PI) * samples);
+    float srcLod = std::log2(std::max(float(srcDim.x) / matchedWidth, 1.f));
+    srcLod = std::clamp(srcLod, 0.f, float(std::max(pEnvTexture->getMipCount(), 1u) - 1u));
+
+    auto var = mpIrradiancePass->getVars()->getRootVar();
+    var["gEnvMap"] = pEnvTexture;
+    var["gEnvSampler"] = pEnvMap->getEnvSampler();
+    var["gIrradiance"] = mpIrradiance;
+    var["PerFrameCB"]["gIrradianceDim"] = uint2(kIrradianceWidth, kIrradianceHeight);
+    var["PerFrameCB"]["gNumSamples"] = kIrradianceSamples;
+    var["PerFrameCB"]["gSrcLod"] = srcLod;
+
+    mpIrradiancePass->execute(pRenderContext, uint3(kIrradianceWidth, kIrradianceHeight, 1));
+    pRenderContext->uavBarrier(mpIrradiance.get());
+
+    mpIrradianceSrc = pEnvTexture;
+    mIrradianceSrcDim = srcDim;
+}
+
 void AmbientPass::renderUI(Gui::Widgets& widget)
 {
     mDirty |= widget.var("Tint", mTint, 0.f, 4.f, 0.01f);
@@ -123,15 +242,6 @@ void AmbientPass::renderUI(Gui::Widgets& widget)
     {
         mDirty |= widget.var("Ambient Color", mAmbientColor, 0.f, 4.f, 0.01f);
     }
-    else
-    {
-        mDirty |= widget.var("Diffuse Mip", mDiffuseMip, 0.f, 12.f, 0.1f);
-        widget.tooltip("Absolute mip level for diffuse IBL lookup (UE AmbientCubemapMipAdjust.z).");
-        mDirty |= widget.var("Specular Mip Boost", mSpecularMipBoost, -4.f, 4.f, 0.1f);
-        widget.tooltip("Subtracted from roughness-derived specular mip (higher = blurrier reflections).");
-    }
-    mDirty |= widget.checkbox("Apply AO to Diffuse", mApplyAOToDiffuse);
-    mDirty |= widget.checkbox("Apply AO to Specular", mApplyAOToSpecular);
 }
 
 void AmbientPass::execute(RenderContext* pRenderContext, const RenderData& renderData)
@@ -142,6 +252,9 @@ void AmbientPass::execute(RenderContext* pRenderContext, const RenderData& rende
     if (mDirty) rebuildPass();
     if (!mpPass) return;
 
+    updatePreIntegratedGF(pRenderContext);
+    updateIrradiance(pRenderContext);
+
     // Compute envmap mip count from the env map texture dimensions.
     // AmbientCubemapMipAdjust.w = MipCount.
     float mipCount = 1.f;
@@ -149,11 +262,15 @@ void AmbientPass::execute(RenderContext* pRenderContext, const RenderData& rende
     {
         uint32_t w = mpScene->getEnvMap()->getEnvMap()->getWidth();
         // ComputeCubemapMipFromRoughness's MipCount is a *cube face* mip count
-        // (CubemapCommon.ush — "e.g. 10 for x 512x512"), but our env map is a
+        // (CubemapCommon.ush -- "e.g. 10 for x 512x512"), but our env map is a
         // lat-long. A lat-long of width W resolves the same angle per texel as a
         // cube face of W/4 (360/W == 90/(W/4)), so the equivalent count is
         // log2(W/4) + 1 == log2(W) - 1. Using log2(W) + 1 here would land two mips
         // coarser at every roughness, i.e. 4x the angular blur UE would pick.
+        //
+        // This is also what makes the shader's AbsoluteDiffuseMip = MipCount - 4
+        // land on the right mip: for the 2048-wide lat-long it is 10 - 4 = 6, i.e.
+        // the same 11.25 degrees per texel as UE's mip 6 of a 512 cube.
         mipCount = std::max(1.f, std::log2(float(w)) - 1.f);
     }
 
@@ -165,6 +282,11 @@ void AmbientPass::execute(RenderContext* pRenderContext, const RenderData& rende
     var["gGBufferD"] = renderData.getTexture("gBufferD");
     var["gSceneDepth"] = renderData.getTexture("sceneDepth");
     var["gAOMap"] = renderData.getTexture("aoMap");
+    var["gIrradiance"] = mpIrradiance;
+    var["gIrradianceSampler"] = mpIrradianceSampler;
+    // updatePreIntegratedGF() above guarantees this exists by the time we bind it.
+    var["gPreIntegratedGF"] = mpPreIntegratedGF;
+    var["gPreIntegratedGFSampler"] = mpPreIntegratedGFSampler;
     var["gAmbient"] = pAmbient;
 
     auto cb = var["PerFrameCB"];
@@ -173,11 +295,7 @@ void AmbientPass::execute(RenderContext* pRenderContext, const RenderData& rende
     cb["gIntensity"] = mIntensity;
     cb["gAmbientColor"] = mAmbientColor;
     cb["gUseFixedColor"] = mUseFixedColor ? 1u : 0u;
-    cb["gDiffuseMip"] = mDiffuseMip;
-    cb["gSpecularMipBoost"] = mSpecularMipBoost;
     cb["gMipCount"] = mipCount;
-    cb["gApplyAOToDiffuse"] = mApplyAOToDiffuse ? 1u : 0u;
-    cb["gApplyAOToSpecular"] = mApplyAOToSpecular ? 1u : 0u;
 
     mpPass->execute(pRenderContext, uint3(pAmbient->getWidth(), pAmbient->getHeight(), 1));
 }

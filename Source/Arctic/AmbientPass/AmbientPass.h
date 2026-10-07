@@ -4,14 +4,14 @@
  # Redistribution and use in source and binary forms, with or without
  # modification, are permitted provided that the following conditions
  # are met:
- #  * Redistributions of source code must retain the copyright
+ #  * Redistributions of source code must retain the above copyright
  #    notice, this list of conditions and the following disclaimer.
  #  * Redistributions in binary form must reproduce the above copyright
  #    notice, this list of conditions and the following disclaimer in the
  #    documentation and/or other materials provided with the distribution.
  #  * Neither the name of NVIDIA CORPORATION nor the names of its
  #    contributors may be used to endorse or promote products derived
- #    from this software without specific written permission.
+ #    from this software without specific prior written permission.
  #
  # THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS "AS IS" AND ANY
  # EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -35,8 +35,19 @@ using namespace Falcor;
 /** Ambient direct lighting pass.
 
     Ports UnrealEngine's AmbientCubemapComposite.usf to a Falcor compute pass.
-    Uses Falcor's EnvMap (lat-long) for IBL lookups and screen-space AO for
-    occlusion.
+
+    Two environment-derived resources back the IBL, each matching UE's own:
+
+      - A cosine-convolved irradiance map (IrradianceConvolve.cs.slang), used for
+        the diffuse lookup. Independent of roughness -- UE's AmbientCubemapMipAdjust.z
+        is a single absolute mip for every pixel. Falcor's lat-long mip chain is a
+        box-filtered blit, not a cosine kernel, so it cannot be used here.
+
+      - UE's PreintegratedGF split-sum table (PreIntegratedGF.cs.slang), used for the
+        specular F*G term in place of an analytic fit.
+
+    Both are per-instance and rebuilt only when their inputs change; see
+    updateIrradiance()/updatePreIntegratedGF().
 
     Computes the sky's direct (single-bounce) contribution only.
 
@@ -61,22 +72,40 @@ public:
 private:
     void rebuildPass();
 
+    /** Rebuild the cosine-convolved irradiance map if the environment map it was
+        built from changed.
+
+        The convolution is done in the env map's local space (rotation is applied at
+        lookup time, exactly as EnvMap::eval does), so rotating or re-tinting the
+        environment does not invalidate it -- only a different texture or a different
+        resolution does.
+    */
+    void updateIrradiance(RenderContext* pRenderContext);
+
+    /** Build UE's PreintegratedGF split-sum table once and keep it resident. It is a
+        pure function of (NoV, roughness), so there is nothing to invalidate.
+    */
+    void updatePreIntegratedGF(RenderContext* pRenderContext);
+
     ref<Scene> mpScene;
     ref<ComputePass> mpPass;
+
+    // Cosine-convolved irradiance (lat-long). See updateIrradiance().
+    ref<ComputePass> mpIrradiancePass;
+    ref<Texture> mpIrradiance;
+    ref<Sampler> mpIrradianceSampler;
+    ref<Texture> mpIrradianceSrc;       ///< Env map the current irradiance was built from.
+    uint2 mIrradianceSrcDim = uint2(0);
+
+    // UE PreintegratedGF split-sum table (128x32 RG16Unorm). See updatePreIntegratedGF().
+    ref<ComputePass> mpPreIntegratedGFPass;
+    ref<Texture> mpPreIntegratedGF;
+    ref<Sampler> mpPreIntegratedGFSampler;
 
     // UE AmbientCubemapColor equivalent: tint * intensity.
     float3 mTint = float3(1.f, 1.f, 1.f);
     float mIntensity = 1.f;
     bool  mUseFixedColor = false; // use a fixed color instead of the envMap for ambient IBL.
     float3 mAmbientColor = float3(1.f, 1.f, 1.f);
-    // UE AmbientCubemapMipAdjust: { mul, add, diffuseMip, mipCount }.
-    // mipCount is computed from the env map dimensions at runtime; we keep
-    // a user-facing "diffuse mip" + "specular mip boost" pair.
-    float mDiffuseMip = 0.f;        // AbsoluteDiffuseMip
-    float mSpecularMipBoost = 0.f;  // subtracted from ComputeCubemapMipFromRoughness result
-    // Apply AO also to specular (UE multiplies final OutColor by AmbientOcclusion,
-    // which dampens both diffuse and specular).
-    bool mApplyAOToSpecular = true;
-    bool mApplyAOToDiffuse = true;
     bool mDirty = true;
 };

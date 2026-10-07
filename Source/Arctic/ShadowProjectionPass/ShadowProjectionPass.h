@@ -97,12 +97,32 @@ private:
     // defaults do not transfer — see ShadowPass.h.
     float mConstantDepthBias = 0.01f;
 
-    // Receiver bias and soft transition scale (UE ProjectionDepthBiasParameters.z /
-    // SoftTransitionScale.z). SoftTransitionScale is in 1/meters: a depth
-    // difference of `1/Scale` meters spans the full transition from unshadowed
-    // to fully shadowed.
-    float mReceiverBias = 1.0f;
-    float mSoftTransitionScale = 10.0f;
+    // Receiver bias and soft transition width (UE ProjectionDepthBiasParameters.z and
+    // SoftTransitionScale.z).
+    //
+    // mReceiverBias is the lower end of the `lerp(mReceiverBias, 1, NoL)` that
+    // attenuates the transition band at grazing incidence. UE's value is
+    // 1 - r.Shadow.CSMReceiverBias = 1 - 0.9 = 0.1 (GetShaderReceiverDepthBias
+    // in ShadowRendering.cpp). The old value of 1.0 made the lerp a no-op, so the
+    // band was never narrowed toward the light angle.
+    float mReceiverBias = 0.1f;
+
+    // The transition width is expressed in SHADOWMAP TEXELS, matching how UE sizes
+    // it: ComputeTransitionSize() (ShadowRendering.cpp) evaluates to
+    // `CVarCSMShadowDepthBias / depthRange * shadowWorldSize / resolution`, i.e.
+    // `10 * worldTexelSize` with UE's default r.Shadow.CSMDepthBias of 10. That
+    // normalization is what keeps the band a constant fraction of a texel
+    // regardless of scene size, and it is why UE does not need a huge depth bias
+    // to hide acne: the wide comparison band absorbs the sub-texel error.
+    //
+    // Expressed directly as a world-space width it would be scene-dependent, so
+    // the number of texels is the portable parameter; execute() converts it using
+    // the fitted frustum published by ShadowPass.
+    float mSoftTransitionTexels = 10.f;
+
+    // Cached 1/meters scale handed to the shader, derived each frame from
+    // mSoftTransitionTexels and the published orthoHalfExtent.
+    float mSoftTransitionScale = 1.f;
 
     // UE ShadowSharpen (ShadowProjectionPixelShader.usf). 1 = identity.
     float mShadowSharpen = 1.0f;

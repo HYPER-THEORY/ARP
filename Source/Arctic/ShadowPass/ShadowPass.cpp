@@ -203,6 +203,36 @@ void ShadowPass::updateLightView()
     const float zPad = std::max(depthRange * 0.05f, 1.f);
     mLightPos = center + f * (lsBounds.minPoint.z - zPad - dot(f, center));
 
+    // --- Texel snapping -----------------------------------------------------
+    // UE snaps the shadow subject's view origin to the texel grid
+    // (ShadowSetup.cpp: "Snap the shadow's position and transform it back into
+    // world space. This snapping prevents sub-texel camera movements which
+    // removes view dependent aliasing from the final shadow result").
+    //
+    // Here the projection maps world to clip as
+    //   clip.x = (dot(r, posW) - originR) / halfExtent.x
+    // with originR = dot(r, mLightPos) + lsCenter.x. Rounding originR to a whole
+    // texel pins the rasterization grid to the world instead of letting it drift
+    // with sub-texel changes in the fitted frustum. Each axis uses its OWN texel
+    // size, because the fitted half-extents differ per axis whenever the
+    // light-space extent is non-square.
+    //
+    // Moving mLightPos along r/u is free: those axes are perpendicular to the
+    // light direction f, so the depth metric dot(f, p - mLightPos) is unchanged
+    // and the published biases stay valid.
+    //
+    // Note this only matters when the fitted frustum actually moves (animated
+    // geometry, WPO, or a moving light). For a fully static scene the fit is
+    // identical every frame, so snapping is idempotent.
+    {
+        const float2 texelSize = float2(2.f * halfExtent.x, 2.f * halfExtent.y) / res;
+        const float originR = dot(r, mLightPos) + lsCenter.x;
+        const float originU = dot(u, mLightPos) + lsCenter.y;
+        const float deltaR = std::round(originR / texelSize.x) * texelSize.x - originR;
+        const float deltaU = std::round(originU / texelSize.y) * texelSize.y - originU;
+        mLightPos += r * deltaR + u * deltaU;
+    }
+
     // With that reference point, depth(p) = dot(f, p - mLightPos) lies in
     // [zPad, depthRange + zPad] for all scene geometry.
     const float zNear = 0.f;
