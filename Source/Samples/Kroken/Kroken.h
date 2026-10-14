@@ -44,6 +44,8 @@
 #include "AmbientPass/AmbientPass.h"
 #include "CompositePass/CompositePass.h"
 #include "GTAOPass/GTAOPass.h"
+#include "SSAOPass/SSAOPass.h"
+#include "HierarchicalZPass/HierarchicalZPass.h"
 #include "MotionVectorPass/MotionVectorPass.h"
 #include "TAAPass/TAAPass.h"
 #include "DebugViewPass/DebugViewPass.h"
@@ -145,6 +147,9 @@ private:
     std::string mCaptureChannelName = "RGB";
 
     bool mScreenshotRequested = false;
+
+    enum class AOMethod { GTAO, SSAO };
+    AOMethod mAOMethod = AOMethod::GTAO;
 
     int mArgc = 0;
     char** mArgv = nullptr;

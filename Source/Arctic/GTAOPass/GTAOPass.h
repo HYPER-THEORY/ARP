@@ -38,26 +38,30 @@ using namespace Falcor;
     four compute passes matching UE's pass boundaries one-for-one, so each stage
     can be dumped and compared against UE in isolation:
 
-      1. GTAOPass.cs.slang          half res  GTAOCombinedPSandCS
-      2. GTAOSpatialFilter.cs.slang half res  GTAOSpatialFilterCS
+      1. GTAO.cs.slang               half res GTAOCombinedPSandCS (HZB-accelerated)
+      2. GTAOSpatialFilter.cs.slang  half res GTAOSpatialFilterCS
       3. GTAOTemporalFilter.cs.slang half res GTAOTemporalFilterPSandCS
-      4. GTAOUpsample.cs.slang      full res  GTAOUpsamplePSAndCS
+      4. GTAOUpsample.cs.slang       full res GTAOUpsamplePSAndCS
 
     Because UE splits the 2/PI normalization across stages 1 and 2,
     the stage-1 output is NOT a usable AO value on its own — a
     fully unoccluded surface reads 2/PI there and only becomes 1.0 after stage 2.
 
-    Input:  gBufferA (world normal), sceneDepth, motionVecs
+    Input:  gBufferA (world normal), sceneDepth, motionVecs,
+            zFurthest (HZB furthest mip chain from HierarchicalZPass)
     Output: aoMap (R8Unorm, full res)
 
-    No bent normal. UE's GTAO does not produce one, and UE's AmbientCubemap
-    applies AO purely multiplicatively against the surface normal
-    (AmbientCubemapComposite.usf). UE's only screen-space bent normal
-    lives in Lumen's ShortRangeAO (LumenScreenSpaceBentNormal.usf).
-
-    No HZB. UE's shipped horizon search escalates through HZB mips so each tap is
-    a conservative closest-Z over a 2^mip footprint; without it, large radii
-    undersample between taps.
+    HZB: UE's shipped horizon search (SearchForLargestAngleDual_HZB) escalates
+    through the furthest HZB mips so each tap is a conservative depth over a
+    2^mip footprint. The mip staircase is a fixed per-quality-tier schedule
+    matching UE's GTAO_BIASMIPLEVEL. UE's loop runs i=1..NumSteps (1-based);
+    the i==0 branch in UE's source is dead code and never executes:
+      tap i=1  -> mip BIASMIPLEVEL
+      tap i=2  -> mip BIASMIPLEVEL + 1
+      tap i=3  -> mip BIASMIPLEVEL        (resets to base; no branch for i==3)
+      tap i>=4 -> mip BIASMIPLEVEL + 2
+    BIASMIPLEVEL per quality tier: Q0=2, Q1=1, Q2=0, Q3=0, Q4=0.
+    When zFurthest is not connected, falls back to direct full-res depth Load.
 */
 class GTAOPass : public RenderPass
 {
@@ -79,11 +83,12 @@ private:
     void allocateResources(uint32_t fullW, uint32_t fullH);
 
     ref<Scene> mpScene;
-    ref<ComputePass> mpSearchPass;    // 1. horizon search + inner integrate
+    ref<ComputePass> mpSearchPass;    // 1. horizon search + inner integrate (HZB)
     ref<ComputePass> mpSpatialPass;   // 2. 5x5 bilateral
     ref<ComputePass> mpTemporalPass;  // 3. reprojected temporal accumulation
     ref<ComputePass> mpUpsamplePass;  // 4. conservative min-of-4 upsample
     ref<Sampler> mpLinearSampler;
+    ref<Sampler> mpHZBSampler;        // point-clamp for HZB reads
 
     // Half-res intermediates (not graph outputs). AO is R8Unorm like UE's.
     ref<Texture> mpHalfAO;         // stage 1 output (2/PI-scaled)
@@ -96,21 +101,20 @@ private:
     // --- UE GTAOParams / ScreenSpaceAOParams equivalents ---
     float mEffectRadius = 1.0f;   // GTAOParams[3].y — world-space radius
     float mThickness = 0.5f;      // r.GTAO.ThicknessBlend; mapped to 1-t^2 on upload
-    uint32_t mNumAngles = 2;      // GTAOParams[4].y — UE's default
-    float mPower = 2.0f;          // ScreenSpaceAOParams[0].x — UE default; halved in shader, so 2.0 == exponent 1.0 == identity
-    float mIntensity = 1.0f;      // ScreenSpaceAOParams[0].w — 0 disables AO
-    float mFadeDistance = 5000.f; // AmbientOcclusionFadeDistance
-    float mFadeRadius = 1000.f;   // AmbientOcclusionFadeRadius — width of the fade
-    float mMaxDistance = 5000.f;  // ScreenSpaceAOParams[4].w — hard early-out
-    float mSpatialFilterWeight = 20000.f; // UE's hardcoded bilateral tolerance
-    float mTemporalBlendWeight = 0.1f;    // GTAOParams[4].x — new-frame weight
+    uint32_t mNumAngles = 2;      // GTAOParams[4].y — UE default
+    float mPower = 2.0f;          // ScreenSpaceAOParams[0].x
+    float mIntensity = 1.0f;      // ScreenSpaceAOParams[0].w
+    // Fade: lerp(AO, 1, saturate(depth*fadeMul+fadeAdd)); mirrors UE ScreenSpaceAOParams[4].xy.
+    float mFadeDistance = 5000.f; // AmbientOcclusionFadeDistance (cm)
+    float mFadeRadius = 1000.f;   // AmbientOcclusionFadeRadius (cm)
+    // MaxDistance: early-out threshold; depths beyond this write AO=1 immediately.
+    // Corresponds to UE ScreenSpaceAOParams[4].w (AmbientOcclusionFadeDistance in UE's GTAO).
+    // Kept as a separate knob so fade and hard-clip can be tuned independently.
+    float mMaxDistance = 5000.f;
+    float mSpatialFilterWeight = 20000.f;
+    float mTemporalBlendWeight = 0.1f;
     bool mEnableTemporal = true;
 
-    // Which stage's half-res result the upsample reads. The whole point of
-    // matching UE's pass boundaries is being able to dump a single stage and
-    // diff it against UE, so this is a first-class control, not a debug hack.
-    // Note stage 0 is 2/PI-scaled (see the class comment), so a fully
-    // unoccluded surface reads 0.6366 there and 1.0 from stage 1 onward.
     enum class OutputStage : uint32_t { Search = 0, Spatial = 1, Temporal = 2 };
     OutputStage mOutputStage = OutputStage::Temporal;
 

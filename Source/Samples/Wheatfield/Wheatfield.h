@@ -48,6 +48,7 @@
 #include "AmbientPass/AmbientPass.h"
 #include "CompositePass/CompositePass.h"
 #include "GTAOPass/GTAOPass.h"
+#include "HierarchicalZPass/HierarchicalZPass.h"
 #include "SSAOPass/SSAOPass.h"
 #include "MotionVectorPass/MotionVectorPass.h"
 #include "TAAPass/TAAPass.h"

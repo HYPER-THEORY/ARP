@@ -30,15 +30,15 @@ target_sources(Arctic PRIVATE
     DIPass/DIPass.3d.slang
     GTAOPass/GTAOPass.cpp
     GTAOPass/GTAOPass.h
-    GTAOPass/GTAOPass.cs.slang
+    GTAOPass/GTAO.cs.slang
     GTAOPass/GTAOSpatialFilter.cs.slang
     GTAOPass/GTAOTemporalFilter.cs.slang
     GTAOPass/GTAOUpsample.cs.slang
-    SSAOPass/SSAOPass.cpp
-    SSAOPass/SSAOPass.h
-    SSAOPass/SSAOPass.cs.slang
-    SSAOPass/SSAOSmooth.cs.slang
-    SSAOPass/SSAOUpsample.cs.slang
+    HierarchicalZPass/HierarchicalZPass.cpp
+    HierarchicalZPass/HierarchicalZPass.h
+    HierarchicalZPass/HZBBuild.cs.slang
+    HierarchicalZPass/ReductionCommon.slang
+    HierarchicalZPass/HierarchicalZ.slang
     MotionVectorPass/MotionVectorPass.cpp
     MotionVectorPass/MotionVectorPass.h
     MotionVectorPass/MotionVectorPass.cs.slang
@@ -72,4 +72,4 @@ set_target_properties(Arctic PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_copy_shaders(Arctic Arctic)
 
-target_source_group(Arctic "Arctic")
+target_source_group(Arctic "ARP")

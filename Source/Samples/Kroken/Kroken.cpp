@@ -134,8 +134,8 @@ void Kroken::parseCommandLine()
     // Supported flags:
     //   --capture [buffer[:channel]]  capture one buffer headlessly and exit.
     //                                 Defaults to final:RGB. Note there is no
-    //                                 --iaprofile (no IndirectApproxPass) and no
-    //                                 --ao (AO is fixed to GTAO).
+    //                                 --iaprofile (no IndirectApproxPass).
+    //   --ao gtao|ssao                select the AO method (default: gtao).
     //   --captureframe N              frame to capture on (default 256, by which
     //                                 point TAA has converged).
     for (int i = 1; i < mArgc; ++i)
@@ -149,6 +149,16 @@ void Kroken::parseCommandLine()
                 const uint32_t frame = (uint32_t)std::atoi(mArgv[i + 1]);
                 if (frame > 0) { mCaptureFrame = frame; ++i; }
                 else logWarning("--captureframe expects a positive frame number.");
+            }
+        }
+        else if (arg == "--ao")
+        {
+            if (i + 1 < mArgc)
+            {
+                const std::string next = mArgv[++i];
+                if (next == "ssao")      mAOMethod = AOMethod::SSAO;
+                else if (next == "gtao") mAOMethod = AOMethod::GTAO;
+                else logWarning("--ao expects 'ssao' or 'gtao', got '{}'", next);
             }
         }
         else if (arg == "--capture")
@@ -189,14 +199,14 @@ void Kroken::onLoad(RenderContext* pRenderContext)
     AssetResolver::getDefaultResolver().addSearchPath(getProjectDirectory() / "assets");
 
     // Register Arctic's render passes with the in-process plugin registry.
-    // SSAOPass and IndirectApproxPass are deliberately not registered: neither is
-    // in the Kroken graph.
     PassRegistrar::registerOne<GBufferPass>();
     PassRegistrar::registerOne<ShadowPass>();
     PassRegistrar::registerOne<ShadowProjectionPass>();
     PassRegistrar::registerOne<SkyboxPass>();
     PassRegistrar::registerOne<DIPass>();
     PassRegistrar::registerOne<GTAOPass>();
+    PassRegistrar::registerOne<SSAOPass>();
+    PassRegistrar::registerOne<HierarchicalZPass>();
     PassRegistrar::registerOne<AmbientPass>();
     PassRegistrar::registerOne<CompositePass>();
     PassRegistrar::registerOne<MotionVectorPass>();
@@ -348,12 +358,23 @@ void Kroken::buildRenderGraph()
         mpGraph->createPass("ShadowProjectionPass", "ShadowProjectionPass", props);
     }
 
+    mpGraph->createPass("HierarchicalZPass", "HierarchicalZPass", Properties{});
+
+    if (mAOMethod == AOMethod::GTAO)
     {
         Properties props;
         props["effectRadius"] = 100.0f;
         props["thickness"] = 0.1f;
         props["power"] = 2.0f;
         mpGraph->createPass("AOPass", "GTAOPass", props);
+    }
+    else
+    {
+        Properties props;
+        props["radius"] = 100.0f;
+        props["radiusInWorldSpace"] = true;
+        props["power"] = 1.0f;
+        mpGraph->createPass("AOPass", "SSAOPass", props);
     }
 
     mpGraph->createPass("DIPass", "DIPass", Properties{});
@@ -384,12 +405,16 @@ void Kroken::buildRenderGraph()
     mpGraph->addEdge("GBufferPass.gBufferD", "ShadowProjectionPass.gBufferD");
     mpGraph->addEdge("ShadowPass.shadowDepth", "ShadowProjectionPass.shadowDepth");
 
+    // HZB pyramid: feeds both the AO pass.
+    mpGraph->addEdge("GBufferPass.depth", "HierarchicalZPass.sceneDepth");
+
     // Ambient occlusion. GTAO's temporal filter reprojects its half-res history,
-    // so it needs the motion vectors; without this edge it logs a warning and
-    // falls back to spatial-only filtering.
+    // so it needs the motion vectors; SSAOPass has no motionVecs input.
     mpGraph->addEdge("GBufferPass.gBufferA", "AOPass.gBufferA");
     mpGraph->addEdge("GBufferPass.depth", "AOPass.sceneDepth");
-    mpGraph->addEdge("MotionVectorPass.motionVecs", "AOPass.motionVecs");
+    if (mAOMethod == AOMethod::GTAO)
+        mpGraph->addEdge("MotionVectorPass.motionVecs", "AOPass.motionVecs");
+    mpGraph->addEdge("HierarchicalZPass.zFurthest", "AOPass.zFurthest");
 
     // Direct (sun) lighting.
     mpGraph->addEdge("GBufferPass.gBufferA", "DIPass.gBufferA");
@@ -615,6 +640,28 @@ void Kroken::onGuiRender(Gui* pGui)
         {
             g.text("No directional light in scene.");
             g.tooltip("Delete the scene cache and rerun to re-import it.", true);
+        }
+    }
+
+    if (auto g = w.group("Ambient Occlusion", true))
+    {
+        Gui::DropdownList aoList;
+        aoList.push_back({(uint32_t)AOMethod::GTAO, "GTAO"});
+        aoList.push_back({(uint32_t)AOMethod::SSAO, "SSAO"});
+        uint32_t aoSel = (uint32_t)mAOMethod;
+        if (g.dropdown("Method", aoList, aoSel))
+        {
+            AOMethod newMethod = (AOMethod)aoSel;
+            if (newMethod != mAOMethod)
+            {
+                mAOMethod = newMethod;
+                buildRenderGraph();
+                if (mpGraph && mpScene)
+                {
+                    mpGraph->setScene(mpScene);
+                    mpGraph->onResize(getTargetFbo().get());
+                }
+            }
         }
     }
 

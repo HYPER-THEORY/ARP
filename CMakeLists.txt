@@ -436,6 +436,7 @@ add_subdirectory(Source/Mogwai)
 add_subdirectory(Source/plugins)
 add_subdirectory(Source/RenderPasses)
 add_subdirectory(Source/Arctic)
+add_subdirectory(Source/ARP)
 add_subdirectory(Source/Samples)
 add_subdirectory(Source/Tools)
 

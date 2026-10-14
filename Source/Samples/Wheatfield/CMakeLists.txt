@@ -5,6 +5,6 @@ target_sources(Wheatfield PRIVATE
     Wheatfield.h
 )
 
-target_link_libraries(Wheatfield PRIVATE Arctic)
+target_link_libraries(Wheatfield PRIVATE Arctic ARP)
 
 target_source_group(Wheatfield "Samples")

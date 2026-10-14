@@ -398,6 +398,7 @@ void Wheatfield::onLoad(RenderContext* pRenderContext)
     PassRegistrar::registerOne<SkyboxPass>();
     PassRegistrar::registerOne<DIPass>();
     PassRegistrar::registerOne<GTAOPass>();
+    PassRegistrar::registerOne<HierarchicalZPass>();
     PassRegistrar::registerOne<SSAOPass>();
     PassRegistrar::registerOne<AmbientPass>();
     PassRegistrar::registerOne<CompositePass>();
@@ -457,6 +458,7 @@ void Wheatfield::buildDeferredGraph()
     mpGraph->createPass("ShadowPass", "ShadowPass", Properties{});
     mpGraph->createPass("SkyboxPass", "SkyboxPass", Properties{});
     mpGraph->createPass("ShadowProjectionPass", "ShadowProjectionPass", Properties{});
+    mpGraph->createPass("HierarchicalZPass", "HierarchicalZPass", Properties{});
     // AO pass is created under a uniform node name "AOPass" so the downstream
     // edges / markOutput / capture plumbing work identically for both methods.
     // GTAOPass additionally consumes motionVecs for its temporal filter; SSAOPass
@@ -498,8 +500,12 @@ void Wheatfield::buildDeferredGraph()
     mpGraph->addEdge("GBufferPass.gBufferD", "ShadowProjectionPass.gBufferD");
     mpGraph->addEdge("ShadowPass.shadowDepth", "ShadowProjectionPass.shadowDepth");
 
+    // HZB pyramid: built from GBuffer depth, feeds both SSAO and GTAO.
+    mpGraph->addEdge("GBufferPass.depth", "HierarchicalZPass.sceneDepth");
+
     mpGraph->addEdge("GBufferPass.gBufferA", "AOPass.gBufferA");
     mpGraph->addEdge("GBufferPass.depth", "AOPass.sceneDepth");
+    mpGraph->addEdge("HierarchicalZPass.zFurthest", "AOPass.zFurthest");
     if (mAOMethod == AOMethod::GTAO)
     {
         // GTAO's temporal filter reprojects its half-res history. Without this the

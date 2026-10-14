@@ -84,7 +84,7 @@ float2 LoadMotion(int2 halfPx)
 }
 
 // Half-res sample position of texel h, in full-res pixel-centre UV space.
-// Texel h holds the AO of full-res pixel 2h (see GTAOPass.cs.slang).
+// Texel h holds the AO of full-res pixel 2h.
 float2 HalfTexelPosUV(int2 halfPx)
 {
     return (float2(halfPx) * 2.0f + 0.5f) / float2(gFullFrameDim);

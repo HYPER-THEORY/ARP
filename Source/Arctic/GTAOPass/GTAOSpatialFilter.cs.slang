@@ -114,13 +114,15 @@ void csMain(
         for (int k = 0; k < 2; ++k)
         {
             int2 ReadXYAO = FullGroupOriginM2 + int2(XPos + k, YPos);
-            // Clamp instead of relying on out-of-bounds Load returning 0, which
-            // would feed AO=0 (fully occluded) into the screen-border taps.
-            ReadXYAO = clamp(ReadXYAO, int2(0, 0), int2(gHalfFrameDim) - 1);
-            int2 ReadXYZ = clamp(ReadXYAO * gDownsampleFactor, int2(0, 0), int2(gFullFrameDim) - 1);
+            // Out-of-bounds reads return 0 (AO=0, fully occluded), matching UE's
+            // GTAOSpatialFilterCS which does a bare Load without clamping.
+            // This keeps screen-border results bit-identical to UE.
+            bool inBoundsAO = all(ReadXYAO >= int2(0, 0)) && all(ReadXYAO < int2(gHalfFrameDim));
+            int2 ReadXYZ = ReadXYAO * gDownsampleFactor;
+            bool inBoundsZ = all(ReadXYZ >= int2(0, 0)) && all(ReadXYZ < int2(gFullFrameDim));
 
-            AOData[LDSPos + k] = gAOMapHalf.Load(int3(ReadXYAO, 0)).r;
-            ZData[LDSPos + k] = gSceneDepth.Load(int3(ReadXYZ, 0)).r;
+            AOData[LDSPos + k] = inBoundsAO ? gAOMapHalf.Load(int3(ReadXYAO, 0)).r : 0.0f;
+            ZData[LDSPos + k] = inBoundsZ ? gSceneDepth.Load(int3(ReadXYZ, 0)).r : 0.0f;
         }
     }
     GroupMemoryBarrierWithGroupSync();
