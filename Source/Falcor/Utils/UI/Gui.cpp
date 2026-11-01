@@ -572,6 +572,7 @@ void GuiImpl::nextColumn()
 
 bool GuiImpl::beginGroup(const char name[], bool beginExpanded)
 {
+    ImGui::PushID(name);
     std::string nameString(name);
     ImGuiTreeNodeFlags flags = beginExpanded ? ImGuiTreeNodeFlags_DefaultOpen : 0;
     bool visible = mGroupStackSize ? ImGui::TreeNodeEx(name, flags) : ImGui::CollapsingHeader(name, flags);
@@ -586,6 +587,7 @@ void GuiImpl::endGroup()
     mGroupStackSize--;
     if (mGroupStackSize)
         ImGui::TreePop();
+    ImGui::PopID();
 }
 
 void GuiImpl::indent(float i)

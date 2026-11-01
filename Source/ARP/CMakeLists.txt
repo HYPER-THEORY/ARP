@@ -1,6 +1,12 @@
 add_library(ARP STATIC)
 
 target_sources(ARP PRIVATE
+    SSAOPass/ACommon.slang
+    SSAOPass/ASSAOPass.cpp
+    SSAOPass/ASSAOPass.h
+    SSAOPass/ASSAO.cs.slang
+    SSAOPass/SSAOHelpers.cpp
+    SSAOPass/SSAOHelpers.h
     SSAOPass/SSAOPass.cpp
     SSAOPass/SSAOPass.h
     SSAOPass/SSAO.cs.slang

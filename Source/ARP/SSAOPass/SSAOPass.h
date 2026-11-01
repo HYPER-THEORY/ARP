@@ -1,4 +1,4 @@
-/// Copyright (C) 2026-2027 The ARP Project. All Rights Reserved.
+/// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
 #pragma once
 
@@ -40,10 +40,12 @@ protected:
     float mIntensity = 0.5f;
     float mFadeDistance = 8000.f;
     float mFadeRadius = 5000.f;
-    float mStepMipLevelFactor = 0.5f;
+    float mMipLevelFactor = 0.5f;
 
     bool mRadiusInWorldSpace = false;
-    bool mEnableSmoothPass = false;
+    bool mEnableSmooth = false;
+    bool mTemporal = true;
+    bool mDifferentiable = false;
 
     ref<Scene> mpScene;
 

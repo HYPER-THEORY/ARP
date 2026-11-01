@@ -1,5 +1,6 @@
-/// Copyright (C) 2026-2027 The ARP Project. All Rights Reserved.
+/// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
+import ACommon;
 import Scene.Scene;
 import Utils.Math.MathHelpers;
 import Arctic.GBufferPass.GBufferHelpers;
@@ -12,7 +13,7 @@ cbuffer CB
     float  bias;
     float  fadeMul;
     float  fadeAdd;
-    float  stepMipLevelFactor;
+    float  mipLevelFactor;
     float  radiusInWorldSpace;
 
     uint2  frameDim;
@@ -80,13 +81,17 @@ float computeMipLevel(int sampleid, int step)
 {
     float samplePos = (float(sampleid) + 0.5) / SAMPLESET_ARRAY_SIZE;
     float scale = float(step + 1) / SAMPLE_STEPS;
-    return log2(stepMipLevelFactor * scale * samplePos);
+    return log2(mipLevelFactor * scale * samplePos);
 }
 
 float getHZBDepth(float2 screenPos, float mipLevel)
 {
     float2 hzbUV = screenPosToUV(screenPos) * hzbUVFactor;
+#ifdef __A
+    float deviceZ = aTrilinearSample(gZFurthest, hzbUV, mipLevel).r;
+#else
     float deviceZ = gZFurthest.SampleLevel(gZFurthestSampler, hzbUV, mipLevel).r;
+#endif
     return convertFromDeviceZ(deviceZ);
 }
 
@@ -110,28 +115,8 @@ float3 wedgeWithNormal(float2 screenPos, float2 localRandom, float3 viewPos, flo
     return float3(invNormAngleL, invNormAngleR, 1.0);
 }
 
-[numthreads(8, 8, 1)]
-void main(uint3 dispatchThreadID : SV_DispatchThreadID)
+float computeAO(float2 uv, float2 screenPos, uint2 pixelPos, float linearZ)
 {
-    uint2 pixelPos = dispatchThreadID.xy;
-
-    if (any(pixelPos >= frameDim))
-    {
-        return;
-    }
-
-    float2 uv = (float2(pixelPos) + 0.5) / float2(frameDim);
-    float2 screenPos = uvToScreenPos(uv);
-
-    float deviceZ = getDeviceZ(pixelPos);
-    float linearZ = convertFromDeviceZ(deviceZ);
-
-    if (deviceZ >= 1.0 || linearZ * fadeMul + fadeAdd >= 1.0)
-    {
-        gAOMap[pixelPos] = 1.0;
-        return;
-    }
-
     float3 fovFix = float3(gScene.camera.data.projMat[0][0], gScene.camera.data.projMat[1][1], 1.0);
 
     float3 worldNormal = getWorldNormal(pixelPos);
@@ -147,7 +132,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float2 fovFixXY = fovFix.xy * (1.0 / linearZ);
     float4 randomBase = float4(randomVec, -randomVec.y, randomVec.x) * fovFixXY.xyxy;
 
-    float3 scaledViewNormal = viewNormal * (0.08 * lerp(linearZ, 1000.0, radiusInWorldSpace));
+    float3 scaledViewNormal = viewNormal * 0.08 * lerp(linearZ, 1000.0, radiusInWorldSpace);
 
     float2 weightAccumulator = float2(0.0001, 0.0001);
 
@@ -176,8 +161,31 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     float result = weightAccumulator.x / weightAccumulator.y;
 
-    result = lerp(result, 1.0, saturate(linearZ * fadeMul + fadeAdd));
-    result = 1.0 - (1.0 - pow(result, power)) * intensity;
+    return 1.0 - (1.0 - pow(lerp(result, 1.0, saturate(linearZ * fadeMul + fadeAdd)), power)) * intensity;
+}
 
-    gAOMap[pixelPos] = result;
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint2 pixelPos = dispatchThreadID.xy;
+
+    if (any(pixelPos >= frameDim))
+    {
+        return;
+    }
+
+    float2 uv = (float2(pixelPos) + 0.5) / float2(frameDim);
+    float2 screenPos = uvToScreenPos(uv);
+
+    float deviceZ = getDeviceZ(pixelPos);
+    float linearZ = convertFromDeviceZ(deviceZ);
+
+    if (deviceZ >= 1.0 || linearZ * fadeMul + fadeAdd >= 1.0)
+    {
+        gAOMap[pixelPos] = 1.0;
+    }
+    else
+    {
+        gAOMap[pixelPos] = computeAO(uv, screenPos, pixelPos, linearZ);
+    }
 }

@@ -22,6 +22,12 @@ echo Fetching dependencies ...
 call %PACKMAN% pull --platform %PLATFORM% %~dp0\dependencies.xml
 if errorlevel 1 goto error
 
+if not exist %~dp0external\pythonlib\torch\__init__.py (
+    echo Installing NumPy, PyTorch ...
+    %~dp0external\packman\python\python.exe -m pip install numpy torch --index-url https://download.pytorch.org/whl/cu130 --target %~dp0external\pythonlib
+    if errorlevel 1 goto error
+)
+
 if not exist %~dp0\.vscode\ (
     echo Setting up VS Code workspace ...
     xcopy %~dp0\.vscode-default\ %~dp0\.vscode\ /y

@@ -13,6 +13,7 @@
 # Packman folders.
 /external/packman/
 /tools/.packman/
+/external/pythonlib/
 
 # IDE folders.
 /.vs/

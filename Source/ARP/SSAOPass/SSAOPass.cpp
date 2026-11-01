@@ -1,4 +1,4 @@
-/// Copyright (C) 2026-2027 The ARP Project. All Rights Reserved.
+/// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
 #include "SSAOPass.h"
 #include "RenderGraph/RenderPassHelpers.h"
@@ -25,9 +25,11 @@ const std::string kRadius             = "radius";
 const std::string kBias               = "bias";
 const std::string kFadeDistance       = "fadeDistance";
 const std::string kFadeRadius         = "fadeRadius";
-const std::string kStepMipLevelFactor = "stepMipLevelFactor";
+const std::string kMipLevelFactor     = "mipLevelFactor";
 const std::string kRadiusInWorldSpace = "radiusInWorldSpace";
-const std::string kEnableSmoothPass   = "enableSmoothPass";
+const std::string kTemporal           = "temporal";
+const std::string kEnableSmooth       = "enableSmooth";
+const std::string kDifferentiable     = "differentiable";
 
 }
 
@@ -53,6 +55,8 @@ SSAOPass::SSAOPass(ref<Device> pDevice, const Properties& props) : RenderPass(pD
         desc.setAddressingMode(TextureAddressingMode::Wrap, TextureAddressingMode::Wrap, TextureAddressingMode::Wrap);
         mpRandomNormalSampler = mpDevice->createSampler(desc);
     }
+
+    initRandomNormalTexture();
 }
 
 RenderPassReflection SSAOPass::reflect(const CompileData& compileData)
@@ -93,7 +97,8 @@ void SSAOPass::execute(RenderContext* pRenderContext, const RenderData& renderDa
     if (!pGBufferA || !pSceneDepth || !pZFurthest || !pAOMap || !mpScene) return;
 
     compilePasses();
-    initRandomNormalTexture();
+
+    if (!mTemporal) mFrameIndex = 0;
 
     float2 hzbSize = float2(pZFurthest->getWidth(0), pZFurthest->getHeight(0));
     float2 hzbUVFactor = float2(mFrameDim.x, mFrameDim.y) / hzbSize * 0.5f;
@@ -108,24 +113,24 @@ void SSAOPass::execute(RenderContext* pRenderContext, const RenderData& renderDa
         var["gZFurthestSampler"]        = mpZFurthestSampler;
         var["gRandomNormal"]            = mpRandomNormalMap;
         var["gRandomNormalSampler"]     = mpRandomNormalSampler;
-        var["gAOMap"]                   = mEnableSmoothPass ? mpAOMap : pAOMap;
+        var["gAOMap"]                   = mEnableSmooth ? mpAOMap : pAOMap;
 
-        var["CB"]["frameDim"]           = mFrameDim;
         var["CB"]["intensity"]          = mIntensity;
         var["CB"]["power"]              = mPower;
         var["CB"]["radius"]             = mRadius / (mRadiusInWorldSpace ? 4.0f : 1600.0f);
         var["CB"]["bias"]               = mBias / 1000.0f;
         var["CB"]["fadeMul"]            = 1.0f / mFadeRadius;
         var["CB"]["fadeAdd"]            = -mFadeDistance / mFadeRadius;
-        var["CB"]["temporalOffset"]     = float2(2.48f, 7.52f) * float(mFrameIndex % 8) / 64.0f;
-        var["CB"]["stepMipLevelFactor"] = mStepMipLevelFactor;
+        var["CB"]["mipLevelFactor"]     = mMipLevelFactor;
         var["CB"]["radiusInWorldSpace"] = mRadiusInWorldSpace ? 1.0f : 0.0f;
+        var["CB"]["frameDim"]           = mFrameDim;
+        var["CB"]["temporalOffset"]     = float2(0.03875f, 0.1175f) * float(mFrameIndex % 8);
         var["CB"]["hzbUVFactor"]        = hzbUVFactor;
 
         mpSSAOPass->execute(pRenderContext, uint3(mFrameDim, 1));
     }
 
-    if (mEnableSmoothPass)
+    if (mEnableSmooth)
     {
         pRenderContext->uavBarrier(mpAOMap.get());
 
@@ -149,9 +154,11 @@ void SSAOPass::setProperties(const Properties& props)
     if (props.has(kBias))               mBias               = props[kBias];
     if (props.has(kFadeDistance))       mFadeDistance       = props[kFadeDistance];
     if (props.has(kFadeRadius))         mFadeRadius         = props[kFadeRadius];
-    if (props.has(kStepMipLevelFactor)) mStepMipLevelFactor = props[kStepMipLevelFactor];
+    if (props.has(kMipLevelFactor))     mMipLevelFactor     = props[kMipLevelFactor];
     if (props.has(kRadiusInWorldSpace)) mRadiusInWorldSpace = props[kRadiusInWorldSpace];
-    if (props.has(kEnableSmoothPass))   mEnableSmoothPass   = props[kEnableSmoothPass];
+    if (props.has(kEnableSmooth))       mEnableSmooth       = props[kEnableSmooth];
+    if (props.has(kTemporal))           mTemporal           = props[kTemporal];
+    if (props.has(kDifferentiable))   { mDifferentiable     = props[kDifferentiable]; mpSSAOPass.reset(); }
 }
 
 Properties SSAOPass::getProperties() const
@@ -163,9 +170,11 @@ Properties SSAOPass::getProperties() const
     props[kBias]               = mBias;
     props[kFadeDistance]       = mFadeDistance;
     props[kFadeRadius]         = mFadeRadius;
-    props[kStepMipLevelFactor] = mStepMipLevelFactor;
+    props[kMipLevelFactor]     = mMipLevelFactor;
     props[kRadiusInWorldSpace] = mRadiusInWorldSpace;
-    props[kEnableSmoothPass]   = mEnableSmoothPass;
+    props[kEnableSmooth]       = mEnableSmooth;
+    props[kTemporal]           = mTemporal;
+    props[kDifferentiable]     = mDifferentiable;
     return props;
 }
 
@@ -175,34 +184,38 @@ void SSAOPass::renderUI(RenderContext* pRenderContext, Gui::Widgets& widget)
     widget.var("Power", mPower, 0.1f, 5.f, 0.01f);
     widget.checkbox("Radius in World Space", mRadiusInWorldSpace);
     widget.var("Radius", mRadius, 1.f, 100000.f, 1.f);
-    widget.var("Bias", mBias, -10.f, 10.f, 0.01f);
+    widget.var("Bias", mBias, 0.f, 10.f, 0.01f);
     widget.var("Fade Distance", mFadeDistance, 1.f, 100000.f, 1.f);
     widget.var("Fade Radius", mFadeRadius, 1.f, 100000.f, 1.f);
-    widget.var("Step Mip Level Factor", mStepMipLevelFactor, 0.f, 100.f, 0.01f);
-    widget.checkbox("Enable Smooth Pass", mEnableSmoothPass);
+    widget.var("Mip Level Factor", mMipLevelFactor, 0.f, 100.f, 0.01f);
+    widget.checkbox("Enable Smooth", mEnableSmooth);
+    widget.checkbox("Temporal", mTemporal);
 }
 
 void SSAOPass::compilePasses()
 {
     if (!mpSSAOPass)
     {
+        DefineList defines = mpScene->getSceneDefines();
+        if (mDifferentiable) defines.add("__A");
+
         ProgramDesc desc;
         desc.addShaderLibrary(kSSAOShader).csEntry("main");
-        mpSSAOPass = ComputePass::create(mpDevice, desc, mpScene->getSceneDefines());
+        mpSSAOPass = ComputePass::create(mpDevice, desc, defines);
     }
 
-    if (mEnableSmoothPass && !mpSSAOSmoothPass)
+    if (mEnableSmooth && !mpSSAOSmoothPass)
     {
+        DefineList defines = mpScene->getSceneDefines();
+
         ProgramDesc desc;
         desc.addShaderLibrary(kSSAOSmoothShader).csEntry("main");
-        mpSSAOSmoothPass = ComputePass::create(mpDevice, desc, mpScene->getSceneDefines());
+        mpSSAOSmoothPass = ComputePass::create(mpDevice, desc, defines);
     }
 }
 
 void SSAOPass::initRandomNormalTexture()
 {
-    if (mpRandomNormalMap) return;
-
     constexpr int kReorder[16] = {0, 11, 7, 3, 10, 4, 15, 12, 6, 8, 1, 14, 13, 2, 9, 5};
 
     using RG = math::vector<uint8_t, 2>;

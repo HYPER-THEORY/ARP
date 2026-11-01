@@ -27,6 +27,14 @@ if %IsDebug% EQU 0 (
 )
 robocopy %ExtDir%\python\ %OutDir% python*.dll /r:0 >nul
 robocopy %ExtDir%\python %OutDir%\pythondist /E /r:0 >nul
+
+set PythonLibDir=%1\external\pythonlib
+set SitePackagesDir=%OutDir%\pythondist\Lib\site-packages
+if exist %PythonLibDir%\torch (
+    if not exist %SitePackagesDir% mkdir %SitePackagesDir%
+    > %SitePackagesDir%\torch.pth echo %PythonLibDir%
+)
+
 robocopy %SlangDir%\bin %OutDir% *.dll /r:0 >nul
 robocopy %ExtDir%\pix\bin\x64 %OutDir% WinPixEventRuntime.dll /r:0 >nul
 robocopy %ExtDir%\nvtt\ %OutDir% cudart64_110.dll /r:0 >nul

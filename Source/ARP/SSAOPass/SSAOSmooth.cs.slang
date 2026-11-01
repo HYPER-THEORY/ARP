@@ -1,4 +1,4 @@
-/// Copyright (C) 2026-2027 The ARP Project. All Rights Reserved.
+/// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
 cbuffer CB
 {
