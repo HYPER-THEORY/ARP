@@ -1,25 +1,9 @@
 /// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
 import ACommon;
+import Arctic.GBufferPass.GBufferHelpers;
 import Scene.Scene;
 import Utils.Math.MathHelpers;
-import Arctic.GBufferPass.GBufferHelpers;
-
-cbuffer CB
-{
-    float  intensity;
-    float  power;
-    float  radius;
-    float  bias;
-    float  fadeMul;
-    float  fadeAdd;
-    float  mipLevelFactor;
-    float  radiusInWorldSpace;
-
-    uint2  frameDim;
-    float2 temporalOffset;
-    float2 hzbUVFactor;
-};
 
 Texture2D<float4>  gGBufferA;
 Texture2D<float>   gSceneDepth;
@@ -29,7 +13,20 @@ Texture2D<float2>  gRandomNormal;
 SamplerState       gRandomNormalSampler;
 RWTexture2D<float> gAOMap;
 
-#define SAMPLE_STEPS 3
+float  intensity;
+float  power;
+float  radius;
+float  bias;
+float  fadeMul;
+float  fadeAdd;
+float  mipLevelFactor;
+float  radiusInWorldSpace;
+
+uint2  frameDim;
+float2 uvFactor;
+float2 temporalOffset;
+
+#define SAMPLE_STEPS         3
 #define SAMPLESET_ARRAY_SIZE 6
 
 static const float2 OcclusionSamplesOffsets[SAMPLESET_ARRAY_SIZE] = {
@@ -86,7 +83,7 @@ float computeMipLevel(int sampleid, int step)
 
 float getHZBDepth(float2 screenPos, float mipLevel)
 {
-    float2 hzbUV = screenPosToUV(screenPos) * hzbUVFactor;
+    float2 hzbUV = screenPosToUV(screenPos) * uvFactor;
 #ifdef __A
     float deviceZ = aTrilinearSample(gZFurthest, hzbUV, mipLevel).r;
 #else
@@ -180,7 +177,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
     float deviceZ = getDeviceZ(pixelPos);
     float linearZ = convertFromDeviceZ(deviceZ);
 
-    if (deviceZ >= 1.0 || linearZ * fadeMul + fadeAdd >= 1.0)
+    if (deviceZ >= 1.0)
     {
         gAOMap[pixelPos] = 1.0;
     }

@@ -101,31 +101,30 @@ void SSAOPass::execute(RenderContext* pRenderContext, const RenderData& renderDa
     if (!mTemporal) mFrameIndex = 0;
 
     float2 hzbSize = float2(pZFurthest->getWidth(0), pZFurthest->getHeight(0));
-    float2 hzbUVFactor = float2(mFrameDim.x, mFrameDim.y) / hzbSize * 0.5f;
 
     {
         auto var = mpSSAOPass->getVars()->getRootVar();
         mpScene->bindShaderData(var["gScene"]);
 
-        var["gGBufferA"]                = pGBufferA;
-        var["gSceneDepth"]              = pSceneDepth;
-        var["gZFurthest"]               = pZFurthest;
-        var["gZFurthestSampler"]        = mpZFurthestSampler;
-        var["gRandomNormal"]            = mpRandomNormalMap;
-        var["gRandomNormalSampler"]     = mpRandomNormalSampler;
-        var["gAOMap"]                   = mEnableSmooth ? mpAOMap : pAOMap;
+        var["gGBufferA"]            = pGBufferA;
+        var["gSceneDepth"]          = pSceneDepth;
+        var["gZFurthest"]           = pZFurthest;
+        var["gZFurthestSampler"]    = mpZFurthestSampler;
+        var["gRandomNormal"]        = mpRandomNormalMap;
+        var["gRandomNormalSampler"] = mpRandomNormalSampler;
+        var["gAOMap"]               = mEnableSmooth ? mpAOMap : pAOMap;
 
-        var["CB"]["intensity"]          = mIntensity;
-        var["CB"]["power"]              = mPower;
-        var["CB"]["radius"]             = mRadius / (mRadiusInWorldSpace ? 4.0f : 1600.0f);
-        var["CB"]["bias"]               = mBias / 1000.0f;
-        var["CB"]["fadeMul"]            = 1.0f / mFadeRadius;
-        var["CB"]["fadeAdd"]            = -mFadeDistance / mFadeRadius;
-        var["CB"]["mipLevelFactor"]     = mMipLevelFactor;
-        var["CB"]["radiusInWorldSpace"] = mRadiusInWorldSpace ? 1.0f : 0.0f;
-        var["CB"]["frameDim"]           = mFrameDim;
-        var["CB"]["temporalOffset"]     = float2(0.03875f, 0.1175f) * float(mFrameIndex % 8);
-        var["CB"]["hzbUVFactor"]        = hzbUVFactor;
+        var["intensity"]            = mIntensity;
+        var["power"]                = mPower;
+        var["radius"]               = mRadius / (mRadiusInWorldSpace ? 4.0f : 1600.0f);
+        var["bias"]                 = mBias / 1000.0f;
+        var["fadeMul"]              = 1.0f / mFadeRadius;
+        var["fadeAdd"]              = -mFadeDistance / mFadeRadius;
+        var["mipLevelFactor"]       = mMipLevelFactor;
+        var["radiusInWorldSpace"]   = mRadiusInWorldSpace ? 1.0f : 0.0f;
+        var["frameDim"]             = mFrameDim;
+        var["uvFactor"]             = float2(mFrameDim.x, mFrameDim.y) / hzbSize * 0.5f;
+        var["temporalOffset"]       = float2(0.03875f, 0.1175f) * float(mFrameIndex % 8);
 
         mpSSAOPass->execute(pRenderContext, uint3(mFrameDim, 1));
     }
@@ -138,7 +137,7 @@ void SSAOPass::execute(RenderContext* pRenderContext, const RenderData& renderDa
 
         var["gAOMap"]         = mpAOMap;
         var["gSmoothedAOMap"] = pAOMap;
-        var["CB"]["frameDim"] = mFrameDim;
+        var["frameDim"]       = mFrameDim;
 
         mpSSAOSmoothPass->execute(pRenderContext, uint3(mFrameDim, 1));
     }

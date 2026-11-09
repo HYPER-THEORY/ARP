@@ -1,12 +1,9 @@
 /// Copyright (C) 2026-2027 ARP (Auto Render Pipeline). All Rights Reserved.
 
-cbuffer CB
-{
-    uint2 frameDim;
-};
-
 Texture2D<float>   gAOMap;
 RWTexture2D<float> gSmoothedAOMap;
+
+uint2 frameDim;
 
 [numthreads(8, 8, 1)]
 void main(uint3 dispatchThreadID : SV_DispatchThreadID)
